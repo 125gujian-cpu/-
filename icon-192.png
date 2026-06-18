@@ -1,0 +1,40 @@
+# 国际法期末刷题 PWA
+
+本部署包包含 116 道题，支持：
+
+- 按章节练习；
+- 单选、多选、判断和情境判断；
+- 自动记录作答次数、正确率和章节覆盖率；
+- 答错自动加入错题本；
+- 错题连续答对指定次数后自动移出；
+- 收藏题、未完成题和随机练习；
+- IndexedDB 自动保存；
+- JSON 备份导出与恢复；
+- PWA 离线缓存和“添加到主屏幕”。
+
+## 推荐部署：GitHub Pages
+
+1. 在 GitHub 新建一个仓库，例如 `international-law-review`。
+2. 解压本压缩包，把 `index.html`、`app.js`、`app.css`、`questions.js`、`manifest.webmanifest`、`sw.js`、`404.html`、`icons` 文件夹全部上传到仓库根目录。
+3. 打开仓库 `Settings → Pages`。
+4. 在 `Build and deployment` 中选择 `Deploy from a branch`。
+5. Branch 选择 `main`，目录选择 `/ (root)`，保存。
+6. 等待 GitHub 生成固定网址。以后始终使用同一个网址打开。
+
+## iPhone / iPad 安装
+
+使用 Safari 打开部署后的固定网址，点击“分享”，选择“添加到主屏幕”。
+
+## 数据保存边界
+
+答题记录保存在“该固定网址 + 当前浏览器”的 IndexedDB 中。更新同一网址下的网站文件通常不会清空记录；改变域名、改变仓库名、清除网站数据或更换设备不会自动继承。因此应定期在“数据”页面导出 JSON 备份。
+
+## 本地预览
+
+直接双击 `index.html` 可以查看大部分功能，但 PWA 安装和离线缓存必须在 HTTPS 或 localhost 环境下运行。可在本目录执行：
+
+```bash
+python -m http.server 8080
+```
+
+然后打开 `http://localhost:8080`。

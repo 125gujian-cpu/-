@@ -1,0 +1,155 @@
+(() => {
+'use strict';
+const BANK = window.QUESTION_BANK;
+const DB_NAME='intl-law-review-db';
+const DB_VERSION=1;
+const STORE='kv';
+const STATE_KEY='app-state-v2';
+const DEFAULT_STATE={version:2,progress:{},activeSession:null,lastSession:null,settings:{masteryTarget:3},createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+const QMAP=new Map();
+const CHMAP=new Map();
+BANK.chapters.forEach(ch=>{CHMAP.set(ch.id,ch);ch.questions.forEach(q=>{q.chapterId=ch.id;QMAP.set(q.id,q)})});
+let state=null, route='home', installPrompt=null, storageMode='IndexedDB', storagePersisted=false;
+const main=document.getElementById('main');
+const toastEl=document.getElementById('toast');
+const modalRoot=document.getElementById('modal-root');
+const importInput=document.getElementById('import-file');
+
+class Store{
+  constructor(){this.db=null}
+  async init(){
+    try{this.db=await new Promise((resolve,reject)=>{const req=indexedDB.open(DB_NAME,DB_VERSION);req.onupgradeneeded=()=>{if(!req.result.objectStoreNames.contains(STORE))req.result.createObjectStore(STORE)};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)});return true}
+    catch(e){storageMode='本地存储兼容模式';return false}
+  }
+  async get(key){if(this.db)return new Promise((resolve,reject)=>{const tx=this.db.transaction(STORE,'readonly');const r=tx.objectStore(STORE).get(key);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});try{return JSON.parse(localStorage.getItem(key))}catch{return null}}
+  async set(key,val){if(this.db)return new Promise((resolve,reject)=>{const tx=this.db.transaction(STORE,'readwrite');tx.objectStore(STORE).put(val,key);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});localStorage.setItem(key,JSON.stringify(val))}
+}
+const store=new Store();
+const clone=o=>JSON.parse(JSON.stringify(o));
+const now=()=>new Date().toISOString();
+const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const shuffle=a=>{a=[...a];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
+const pct=(a,b)=>b?Math.round(a/b*100):0;
+function defaultStat(){return {attempts:0,correct:0,wrong:0,lastCorrect:null,lastAnswer:[],lastAnsweredAt:null,inWrongBook:false,reviewStreak:0,starred:false}}
+function getStat(id){if(!state.progress[id])state.progress[id]=defaultStat();return state.progress[id]}
+async function save(){state.updatedAt=now();await store.set(STATE_KEY,state)}
+function toast(msg){toastEl.textContent=msg;toastEl.classList.add('show');clearTimeout(toast._t);toast._t=setTimeout(()=>toastEl.classList.remove('show'),1800)}
+function setHash(name){location.hash='#/'+name}
+function currentRoot(){return (location.hash.replace(/^#\//,'').split('/')[0]||'home')}
+function setNav(){const root=currentRoot();document.querySelectorAll('[data-route]').forEach(b=>b.classList.toggle('active',b.dataset.route===root))}
+function allQuestions(){return BANK.chapters.flatMap(ch=>ch.questions)}
+function statsFor(ids=allQuestions().map(q=>q.id)){
+  let attempts=0,correct=0,answered=0,wrongBook=0,starred=0;
+  ids.forEach(id=>{const s=state.progress[id];if(!s)return;attempts+=s.attempts||0;correct+=s.correct||0;if(s.attempts)answered++;if(s.inWrongBook)wrongBook++;if(s.starred)starred++});
+  return {attempts,correct,answered,wrongBook,starred,accuracy:pct(correct,attempts)}
+}
+function chapterStats(ch){return statsFor(ch.questions.map(q=>q.id))}
+function typeLabel(q){if(q.type==='multiple')return '多选题';if(q.type==='single')return '单选题';if(q.type==='judge')return '判断题';return '情境判断题'}
+function modal({title,body,confirmText='确定',danger=false,onConfirm,cancelText='取消'}){
+  modalRoot.innerHTML=`<div class="modal-backdrop"><div class="modal"><h2>${esc(title)}</h2><div>${body}</div><div class="modal-actions"><button class="secondary-btn" data-modal-cancel>${esc(cancelText)}</button><button class="${danger?'danger-btn':'primary-btn dark'}" data-modal-confirm>${esc(confirmText)}</button></div></div></div>`;
+  modalRoot.querySelector('[data-modal-cancel]').onclick=()=>modalRoot.innerHTML='';
+  modalRoot.querySelector('.modal-backdrop').onclick=e=>{if(e.target===e.currentTarget)modalRoot.innerHTML=''};
+  modalRoot.querySelector('[data-modal-confirm]').onclick=async()=>{modalRoot.innerHTML='';if(onConfirm)await onConfirm()};
+}
+function statusText(q){const s=state.progress[q.id];if(!s||!s.attempts)return '<span class="status-dot">未作答</span>';if(s.inWrongBook)return '<span class="status-dot wrong">错题</span>';return '<span class="status-dot done">已作答</span>'}
+
+function renderHome(){
+  const s=statsFor();
+  const resume=state.activeSession&&!state.activeSession.completed?`<div class="resume-card"><div><h3>继续上次练习</h3><p>${esc(state.activeSession.title)} · 第 ${Math.min(state.activeSession.currentIndex+1,state.activeSession.questionIds.length)} / ${state.activeSession.questionIds.length} 题</p></div><div class="resume-actions"><button class="secondary-btn" data-discard-session>放弃</button><button class="primary-btn dark" data-resume>继续</button></div></div>`:'';
+  main.innerHTML=`
+    <section class="hero"><h1>国际法期末刷题</h1><p>共 ${BANK.total} 道选择题、判断题与情境判断题。答题记录自动保存在当前浏览器，错题连续答对 ${state.settings.masteryTarget} 次后移出错题本。</p><div class="hero-actions"><button class="primary-btn" data-random-all>综合随机 20 题</button><button class="secondary-btn" data-route="wrong">错题复刷 ${s.wrongBook?`(${s.wrongBook})`:''}</button><button class="secondary-btn" data-star-practice>收藏题</button></div></section>
+    ${resume}
+    <section class="stats-grid"><div class="stat-card"><span>已覆盖</span><strong>${s.answered}/${BANK.total}</strong><small>${pct(s.answered,BANK.total)}%</small></div><div class="stat-card"><span>累计作答</span><strong>${s.attempts}</strong><small>次</small></div><div class="stat-card"><span>总体正确率</span><strong>${s.accuracy}%</strong><small>${s.correct} 题次正确</small></div><div class="stat-card"><span>当前错题</span><strong>${s.wrongBook}</strong><small>待复刷</small></div></section>
+    <div class="section-head"><div><h2>章节进度</h2><p>按 PPT 章节整理，点击进入专项练习</p></div><button class="link-btn" data-route="chapters">查看全部</button></div>
+    <section class="chapter-grid">${BANK.chapters.map(ch=>chapterCard(ch)).join('')}</section>`;
+  bindCommon();
+  main.querySelector('[data-random-all]').onclick=()=>startSession({questionIds:shuffle(allQuestions().map(q=>q.id)).slice(0,20),mode:'random',title:'综合随机 20 题'});
+  main.querySelector('[data-star-practice]').onclick=()=>{const ids=allQuestions().filter(q=>getStat(q.id).starred).map(q=>q.id);if(!ids.length)return toast('还没有收藏题');startSession({questionIds:ids,mode:'starred',title:'收藏题练习'})};
+  const resumeBtn=main.querySelector('[data-resume]');if(resumeBtn)resumeBtn.onclick=()=>{setHash('practice')};
+  const discard=main.querySelector('[data-discard-session]');if(discard)discard.onclick=()=>modal({title:'放弃当前练习？',body:'<p>已经提交的题目记录会保留，未完成的练习队列将被删除。</p>',confirmText:'放弃练习',danger:true,onConfirm:async()=>{state.activeSession=null;await save();renderHome()}})
+}
+function chapterCard(ch){const s=chapterStats(ch);return `<article class="chapter-card"><button data-chapter="${ch.id}"><span class="chapter-index">CHAPTER ${ch.id}</span><h3>${esc(ch.title)}</h3><div class="meta-row"><span>共 ${ch.questions.length} 题</span><span>已做 ${s.answered}</span><span>错题 ${s.wrongBook}</span></div><div class="progress"><i style="width:${pct(s.answered,ch.questions.length)}%"></i></div><div class="chapter-bottom"><span>覆盖率 ${pct(s.answered,ch.questions.length)}%</span><span>正确率 ${s.accuracy}%</span></div></button></article>`}
+
+function renderChapters(){
+  main.innerHTML=`<div class="page-head"><div><h1>分章节练习</h1><p>每章可顺序练习、只做未完成题或进入本章错题复刷。</p></div></div><section class="chapter-grid">${BANK.chapters.map(ch=>chapterCard(ch)).join('')}</section>`;bindCommon()
+}
+function renderChapter(id){
+  const ch=CHMAP.get(id);if(!ch)return setHash('chapters');const s=chapterStats(ch);
+  const counts={single:0,multiple:0,judge:0,scenario:0};ch.questions.forEach(q=>counts[q.type]++);
+  main.innerHTML=`<button class="back-btn" data-route="chapters">← 返回章节</button><div class="page-head"><div><span class="chapter-index">CHAPTER ${ch.id}</span><h1>${esc(ch.title)}</h1><p>共 ${ch.questions.length} 题 · 已覆盖 ${s.answered} 题 · 错题 ${s.wrongBook} 题</p></div></div>
+  <section class="panel"><h2>开始练习</h2><div class="mode-grid">
+    <button class="mode-card" data-mode="all"><strong>顺序练习</strong><small>本章全部 ${ch.questions.length} 题，按原顺序作答</small></button>
+    <button class="mode-card" data-mode="unanswered" ${s.answered===ch.questions.length?'disabled':''}><strong>只做未完成</strong><small>剩余 ${ch.questions.length-s.answered} 题</small></button>
+    <button class="mode-card" data-mode="wrong" ${!s.wrongBook?'disabled':''}><strong>错题复刷</strong><small>${s.wrongBook} 题，连续答对 ${state.settings.masteryTarget} 次移出</small></button>
+    <button class="mode-card" data-mode="random"><strong>随机练习</strong><small>随机抽取最多 10 题</small></button>
+  </div></section>
+  <section class="panel"><h2>题型分布</h2><div class="filter-row"><button class="chip active" data-filter="all">全部 ${ch.questions.length}</button>${counts.single?`<button class="chip" data-filter="single">单选 ${counts.single}</button>`:''}${counts.multiple?`<button class="chip" data-filter="multiple">多选 ${counts.multiple}</button>`:''}${counts.judge?`<button class="chip" data-filter="judge">判断 ${counts.judge}</button>`:''}${counts.scenario?`<button class="chip" data-filter="scenario">情境 ${counts.scenario}</button>`:''}</div></section>
+  <section class="panel"><h2>题目索引</h2><div class="question-list" id="chapter-question-list"></div></section>`;
+  bindCommon();let filter='all';
+  const draw=()=>{const qs=ch.questions.filter(q=>filter==='all'||q.type===filter);document.getElementById('chapter-question-list').innerHTML=qs.map(q=>`<div class="question-row"><span class="q-no">${q.number}</span><div class="q-summary">${esc(q.text)}<small>${typeLabel(q)}${getStat(q.id).starred?' · 已收藏':''}</small></div>${statusText(q)}</div>`).join('')};draw();
+  main.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;main.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('active',x===b));draw()});
+  main.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{if(b.disabled)return;let qs=ch.questions.filter(q=>filter==='all'||q.type===filter);const mode=b.dataset.mode;if(mode==='unanswered')qs=qs.filter(q=>!getStat(q.id).attempts);if(mode==='wrong')qs=qs.filter(q=>getStat(q.id).inWrongBook);if(mode==='random')qs=shuffle(qs).slice(0,10);if(!qs.length)return toast('当前筛选下没有可练习题目');startSession({questionIds:qs.map(q=>q.id),mode,chapterId:id,title:`${ch.title} · ${mode==='wrong'?'错题复刷':mode==='unanswered'?'未完成题':mode==='random'?'随机练习':'顺序练习'}`})})
+}
+
+async function startSession({questionIds,mode,title,chapterId=null}){
+  if(!questionIds.length)return toast('没有可练习的题目');
+  state.activeSession={id:'s-'+Date.now(),questionIds,currentIndex:0,mode,title,chapterId,answers:{},startedAt:now(),completed:false};await save();setHash('practice')
+}
+function sameAnswer(a,b){return [...a].sort().join('')===[...b].sort().join('')}
+function renderPractice(){
+  const s=state.activeSession;if(!s||s.completed)return setHash('home');if(!s.questionIds.length)return setHash('home');
+  const idx=Math.min(s.currentIndex,s.questionIds.length-1);s.currentIndex=idx;const q=QMAP.get(s.questionIds[idx]);if(!q){state.activeSession=null;save();return setHash('home')}
+  const ans=s.answers[q.id]||{selected:[],submitted:false,correct:null};s.answers[q.id]=ans;const stat=getStat(q.id);
+  const optionHtml=q.options.map(o=>{const selected=ans.selected.includes(o.key);const isCorrect=ans.submitted&&q.answerKeys.includes(o.key);const isIncorrect=ans.submitted&&selected&&!q.answerKeys.includes(o.key);return `<button class="option ${selected?'selected':''} ${isCorrect?'correct':''} ${isIncorrect?'incorrect':''}" data-option="${o.key}" ${ans.submitted?'disabled':''}><span class="option-key">${esc(o.key)}</span><span>${esc(o.text)}</span></button>`}).join('');
+  const feedback=ans.submitted?`<div class="answer-panel ${ans.correct?'good':'bad'}"><strong>${ans.correct?'回答正确':'回答错误'} · 正确答案：${esc(q.answerDisplay)}</strong>${q.note?`<div class="note-box">${esc(q.note)}</div>`:''}${stat.inWrongBook?`<div class="note-box">错题复刷进度：连续答对 ${stat.reviewStreak}/${state.settings.masteryTarget} 次</div>`:''}</div>`:'';
+  main.innerHTML=`<div class="practice-shell"><div class="practice-top"><div><button class="back-btn" data-exit-practice>← 退出练习</button><h1>${esc(s.title)}</h1><p>第 ${idx+1} / ${s.questionIds.length} 题</p></div><div class="practice-actions"><button class="star-btn ${stat.starred?'active':''}" data-star aria-label="收藏题目">${stat.starred?'★':'☆'}</button></div></div><div class="practice-progress progress"><i style="width:${pct(idx+1,s.questionIds.length)}%"></i></div>
+  <article class="question-card"><div class="question-meta"><span class="badge ${q.type==='multiple'?'multi':''}">${typeLabel(q)}${q.type==='multiple'?' · 可多选':''}</span>${stat.inWrongBook?'<span class="badge wrong">错题本</span>':''}</div>${q.prompt?`<div class="prompt">${esc(q.prompt)}</div>`:''}<h2>${q.number}. ${esc(q.text)}</h2><div class="options">${optionHtml}</div>${feedback}
+  <div class="practice-footer"><div><button class="secondary-btn" data-prev ${idx===0?'disabled':''}>上一题</button><button class="secondary-btn" data-next ${idx===s.questionIds.length-1?'disabled':''}>下一题</button></div>${ans.submitted?`<button class="primary-btn dark submit-btn" data-advance>${idx===s.questionIds.length-1?'完成练习':'下一题'}</button>`:`<button class="primary-btn dark submit-btn" data-submit ${!ans.selected.length?'disabled':''}>提交答案</button>`}</div></article></div>`;
+  const saveSession=async()=>{state.activeSession=s;await save()};
+  main.querySelector('[data-exit-practice]').onclick=()=>modal({title:'退出当前练习？',body:'<p>练习进度已自动保存，下次可以从首页继续。</p>',confirmText:'退出',onConfirm:()=>setHash(s.chapterId?`chapter/${s.chapterId}`:'home')});
+  main.querySelector('[data-star]').onclick=async()=>{stat.starred=!stat.starred;await save();renderPractice();toast(stat.starred?'已收藏':'已取消收藏')};
+  main.querySelectorAll('[data-option]').forEach(b=>b.onclick=async()=>{const k=b.dataset.option;if(q.type==='multiple'){ans.selected=ans.selected.includes(k)?ans.selected.filter(x=>x!==k):[...ans.selected,k]}else ans.selected=[k];await saveSession();renderPractice()});
+  const submit=main.querySelector('[data-submit]');if(submit)submit.onclick=async()=>{if(!ans.selected.length)return;ans.submitted=true;ans.correct=sameAnswer(ans.selected,q.answerKeys);recordAttempt(q.id,ans.correct,ans.selected,s.mode);await saveSession();renderPractice()};
+  const prev=main.querySelector('[data-prev]');if(prev)prev.onclick=async()=>{s.currentIndex--;await saveSession();renderPractice();window.scrollTo({top:0,behavior:'smooth'})};
+  const next=main.querySelector('[data-next]');if(next)next.onclick=async()=>{s.currentIndex++;await saveSession();renderPractice();window.scrollTo({top:0,behavior:'smooth'})};
+  const adv=main.querySelector('[data-advance]');if(adv)adv.onclick=async()=>{if(idx===s.questionIds.length-1){await finishSession()}else{s.currentIndex++;await saveSession();renderPractice();window.scrollTo({top:0,behavior:'smooth'})}};
+}
+function recordAttempt(id,correct,selected,mode){const s=getStat(id);s.attempts++;s.lastCorrect=correct;s.lastAnswer=[...selected];s.lastAnsweredAt=now();if(correct){s.correct++;if(s.inWrongBook&&mode==='wrong'){s.reviewStreak=(s.reviewStreak||0)+1;if(s.reviewStreak>=state.settings.masteryTarget){s.inWrongBook=false;s.reviewStreak=state.settings.masteryTarget}}}else{s.wrong++;s.inWrongBook=true;s.reviewStreak=0}}
+async function finishSession(){const s=state.activeSession;const answers=Object.values(s.answers);const done=answers.filter(a=>a.submitted);const correct=done.filter(a=>a.correct).length;const incorrectIds=s.questionIds.filter(id=>s.answers[id]?.submitted&&!s.answers[id].correct);state.lastSession={title:s.title,total:s.questionIds.length,answered:done.length,correct,incorrectIds,finishedAt:now(),chapterId:s.chapterId};state.activeSession=null;await save();setHash('summary')}
+function renderSummary(){const x=state.lastSession;if(!x)return setHash('home');const acc=pct(x.correct,x.answered);main.innerHTML=`<div class="summary"><section class="panel summary-score"><span class="badge">练习完成</span><h1>${esc(x.title)}</h1><strong>${acc}%</strong><p>本次正确率</p><div class="summary-grid"><div><b>${x.answered}</b><span>已作答</span></div><div><b>${x.correct}</b><span>答对</span></div><div><b>${x.answered-x.correct}</b><span>答错</span></div></div><div class="summary-actions">${x.incorrectIds.length?'<button class="secondary-btn" data-review-session>重做本次错题</button>':''}<button class="primary-btn dark" data-summary-back>返回</button></div></section></div>`;if(x.incorrectIds.length)main.querySelector('[data-review-session]').onclick=()=>startSession({questionIds:x.incorrectIds,mode:'wrong',chapterId:x.chapterId,title:'本次错题重做'});main.querySelector('[data-summary-back]').onclick=()=>setHash(x.chapterId?`chapter/${x.chapterId}`:'home')}
+
+function renderWrong(){
+  const wrong=allQuestions().filter(q=>getStat(q.id).inWrongBook);const byCh=BANK.chapters.map(ch=>({ch,qs:ch.questions.filter(q=>getStat(q.id).inWrongBook)})).filter(x=>x.qs.length);
+  main.innerHTML=`<div class="page-head"><div><h1>错题复刷</h1><p>答错自动进入错题本；在错题模式下连续答对 ${state.settings.masteryTarget} 次后自动移出。</p></div>${wrong.length?'<button class="primary-btn dark" data-start-wrong>开始全部错题</button>':''}</div>${wrong.length?byCh.map(({ch,qs})=>`<section class="panel"><div class="section-head" style="margin:0 0 12px"><div><h2>${esc(ch.title)}</h2><p>${qs.length} 道错题</p></div><button class="link-btn" data-wrong-ch="${ch.id}">本章复刷</button></div><div class="wrong-grid">${qs.map(q=>{const s=getStat(q.id);return `<div class="wrong-item"><div><h3>${q.number}. ${esc(q.text)}</h3><p>${typeLabel(q)} · 累计答错 ${s.wrong} 次</p></div><div class="streak">巩固 ${s.reviewStreak}/${state.settings.masteryTarget}<span class="mastery-dots">${Array.from({length:state.settings.masteryTarget},(_,i)=>`<i class="${i<s.reviewStreak?'on':''}"></i>`).join('')}</span></div></div>`}).join('')}</div></section>`).join(''):`<section class="panel empty"><strong>目前没有错题</strong>答错的题目会自动加入这里。</section>`}`;
+  if(wrong.length)main.querySelector('[data-start-wrong]').onclick=()=>startSession({questionIds:wrong.map(q=>q.id),mode:'wrong',title:'全部错题复刷'});main.querySelectorAll('[data-wrong-ch]').forEach(b=>b.onclick=()=>{const ch=CHMAP.get(b.dataset.wrongCh);startSession({questionIds:ch.questions.filter(q=>getStat(q.id).inWrongBook).map(q=>q.id),mode:'wrong',chapterId:ch.id,title:`${ch.title} · 错题复刷`})})
+}
+
+async function refreshStorageInfo(){
+  try{if(navigator.storage?.persisted)storagePersisted=await navigator.storage.persisted()}catch{}
+}
+function renderData(){
+  const s=statsFor();main.innerHTML=`<div class="page-head"><div><h1>数据与设置</h1><p>答题记录保存在当前固定网址和当前浏览器中。</p></div></div><div class="notice">部署到固定网址后，只要网址、浏览器和站点数据不变，更新题库页面也不会清空记录。换设备、换浏览器或清除网站数据前，请先导出备份。</div><section class="data-grid">
+  <div class="data-block"><h3>保存状态</h3><p>存储引擎：${esc(storageMode)}</p><div class="storage-status"><span class="dot ${storagePersisted?'ok':''}"></span><b>${storagePersisted?'已获得持久化存储保护':'尚未获得持久化存储保护'}</b></div><div class="button-row"><button class="primary-btn dark" data-persist>申请持久保存</button><button class="secondary-btn" data-install-help>安装到桌面</button></div></div>
+  <div class="data-block"><h3>学习记录</h3><p>已覆盖 ${s.answered}/${BANK.total} 题，累计作答 ${s.attempts} 次，当前错题 ${s.wrongBook} 道。</p><div class="button-row"><button class="primary-btn dark" data-export>导出备份</button><button class="secondary-btn" data-import>导入备份</button></div></div>
+  <div class="data-block"><h3>错题掌握规则</h3><p>当前设置：错题在“错题复刷”模式下连续答对 ${state.settings.masteryTarget} 次后移出错题本。</p><div class="filter-row">${[1,2,3,4,5].map(n=>`<button class="chip ${n===state.settings.masteryTarget?'active':''}" data-target="${n}">${n} 次</button>`).join('')}</div></div>
+  <div class="data-block"><h3>重置数据</h3><p>可以仅清空练习进度；题库文件不会受影响。此操作不可撤销。</p><div class="button-row"><button class="danger-btn" data-clear>清空全部记录</button></div></div></section>`;
+  main.querySelector('[data-export]').onclick=exportData;main.querySelector('[data-import]').onclick=()=>importInput.click();main.querySelector('[data-persist]').onclick=requestPersist;main.querySelector('[data-install-help]').onclick=showInstallHelp;main.querySelector('[data-clear]').onclick=()=>modal({title:'确认清空全部记录？',body:'<p>所有答题次数、错题、收藏和当前练习都会被删除。建议先导出备份。</p>',confirmText:'永久清空',danger:true,onConfirm:async()=>{state=clone(DEFAULT_STATE);await save();toast('记录已清空');renderData()}});main.querySelectorAll('[data-target]').forEach(b=>b.onclick=async()=>{state.settings.masteryTarget=Number(b.dataset.target);await save();renderData();toast('错题掌握规则已更新')})
+}
+function exportData(){const payload={app:'国际法期末刷题',formatVersion:2,questionBankVersion:BANK.version,exportedAt:now(),state};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`国际法刷题记录_${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);toast('备份已导出')}
+importInput.onchange=async()=>{const file=importInput.files[0];importInput.value='';if(!file)return;try{const obj=JSON.parse(await file.text());if(!obj.state||!obj.state.progress)throw new Error('格式错误');modal({title:'导入学习记录？',body:`<p>备份时间：${esc(obj.exportedAt||'未知')}。导入后会覆盖当前记录。</p>`,confirmText:'覆盖并导入',onConfirm:async()=>{state={...clone(DEFAULT_STATE),...obj.state,settings:{...DEFAULT_STATE.settings,...obj.state.settings}};await save();toast('记录已恢复');renderData()}})}catch(e){toast('无法读取该备份文件')}};
+async function requestPersist(){if(!navigator.storage?.persist)return toast('当前浏览器不支持申请持久化存储');try{const ok=await navigator.storage.persist();storagePersisted=ok;toast(ok?'已获得持久化存储保护':'浏览器暂未授予持久化存储');renderData()}catch{toast('申请失败')}}
+function showInstallHelp(){const ios=/iphone|ipad|ipod/i.test(navigator.userAgent);const body=ios?'<p>请使用 Safari 打开固定网址，点击底部“分享”按钮，再选择“添加到主屏幕”。</p>':'<p>使用 Chrome 或 Edge 打开固定网址，点击地址栏右侧的安装图标；也可以点击页面右上角“安装”。</p>';modal({title:'安装到桌面',body,confirmText:'知道了',cancelText:'关闭'})}
+
+function bindCommon(){document.querySelectorAll('[data-route]').forEach(b=>b.onclick=()=>setHash(b.dataset.route));document.querySelectorAll('[data-chapter]').forEach(b=>b.onclick=()=>setHash(`chapter/${b.dataset.chapter}`));setNav()}
+function render(){const parts=location.hash.replace(/^#\//,'').split('/');route=parts[0]||'home';window.scrollTo(0,0);if(route==='home')renderHome();else if(route==='chapters')renderChapters();else if(route==='chapter')renderChapter(parts[1]);else if(route==='practice')renderPractice();else if(route==='wrong')renderWrong();else if(route==='summary')renderSummary();else if(route==='data')renderData();else setHash('home');setNav();main.focus({preventScroll:true})}
+
+window.addEventListener('hashchange',render);document.addEventListener('click',e=>{const r=e.target.closest('[data-route]');if(r&&r.closest('.topbar,.bottom-nav')){e.preventDefault();setHash(r.dataset.route)}});
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;document.getElementById('install-btn').classList.remove('hidden')});
+document.getElementById('install-btn').onclick=async()=>{if(!installPrompt)return showInstallHelp();installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;document.getElementById('install-btn').classList.add('hidden')};
+window.addEventListener('appinstalled',()=>toast('已安装到桌面'));
+
+async function init(){
+  await store.init();const saved=await store.get(STATE_KEY);state=saved&&saved.progress?{...clone(DEFAULT_STATE),...saved,settings:{...DEFAULT_STATE.settings,...saved.settings}}:clone(DEFAULT_STATE);await refreshStorageInfo();await save();if('serviceWorker'in navigator&&location.protocol.startsWith('http')){navigator.serviceWorker.register('./sw.js').catch(()=>{})}if(!location.hash)location.hash='#/home';else render()
+}
+init();
+})();

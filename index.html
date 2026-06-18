@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b2f5b">
+  <meta name="description" content="国际法期末选择题、判断题分章节刷题与错题复刷工具">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="国际法刷题">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./app.css">
+  <title>国际法期末刷题</title>
+</head>
+<body>
+  <div id="app-shell">
+    <header class="topbar">
+      <button class="brand" data-route="home" aria-label="返回首页">
+        <span class="brand-mark">国法</span>
+        <span><strong>国际法期末刷题</strong><small>分章节 · 错题复刷 · 自动保存</small></span>
+      </button>
+      <div class="top-actions">
+        <button id="install-btn" class="ghost-btn hidden">安装</button>
+        <button class="icon-btn" data-route="data" aria-label="数据与设置">⋯</button>
+      </div>
+    </header>
+    <main id="main" tabindex="-1"></main>
+    <nav class="bottom-nav" aria-label="主导航">
+      <button data-route="home"><span>⌂</span><em>首页</em></button>
+      <button data-route="chapters"><span>▦</span><em>章节</em></button>
+      <button data-route="wrong"><span>↻</span><em>错题</em></button>
+      <button data-route="data"><span>◫</span><em>数据</em></button>
+    </nav>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="modal-root"></div>
+  <input id="import-file" type="file" accept="application/json,.json" hidden>
+  <script src="./questions.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
